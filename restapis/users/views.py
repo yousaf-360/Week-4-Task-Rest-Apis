@@ -5,11 +5,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from django.core.exceptions import PermissionDenied
+from rest_framework.exceptions import APIException
 from .models import CustomUser
 from .serializers import CustomUserSerializer
 from rest_framework.authtoken.models import Token
 
 class LoginAPIView(APIView):
+    """
+    Handles user login and token generation.
+    """
     def post(self, request, *args, **kwargs):
         username = request.data.get('username')
         password = request.data.get('password')
@@ -22,17 +26,24 @@ class LoginAPIView(APIView):
         user = authenticate(username=username, password=password)
         
         if user is not None:
+            if user.role == 'patient':
+                return Response(
+                    {'non_field_errors': ['Patients cannot log in.']},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
             token, created = Token.objects.get_or_create(user=user)
             return Response({'token': token.key}, status=status.HTTP_200_OK)
         else:
-            raise ValidationError('Invalid credentials')
+            return Response(
+                {'non_field_errors': ['Invalid credentials']},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
-
-class UserListAPIView(generics.ListAPIView):
+class UserListAPIView(generics.ListCreateAPIView):
     """
-    List users (doctors and patients). Only accessible by admin.
-    Can be filtered by role using the 'role' query parameter.
+    Lists and creates users (doctors and patients).
     """
     serializer_class = CustomUserSerializer
     permission_classes = [IsAuthenticated]
@@ -51,9 +62,15 @@ class UserListAPIView(generics.ListAPIView):
         
         return queryset
 
+    def perform_create(self, serializer):
+        if self.request.user.role != 'admin':
+            raise PermissionDenied("You do not have permission to create this resource.")
+        serializer.save()
+
+
 class UserDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     """
-    Retrieve, update, or delete a single user. Only accessible by admin.
+    Retrieve, update, or delete a specific user.
     """
     queryset = CustomUser.objects.all()
     serializer_class = CustomUserSerializer
@@ -65,16 +82,19 @@ class UserDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         return super().get_object()
 
     def put(self, request, *args, **kwargs):
-        """
-        Override the update method to return the updated user data.
-        """
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_200_OK, headers=headers)
+        try:
+            partial = kwargs.pop('partial', False)
+            instance = self.get_object()
+            serializer = self.get_serializer(instance, data=request.data, partial=partial)
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response({'detail': e.detail}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({'detail': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({'detail': f'An unexpected error occurred: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def perform_update(self, serializer):
         if self.request.user.role != 'admin':
@@ -82,15 +102,21 @@ class UserDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         serializer.save()
 
     def delete(self, request, *args, **kwargs):
-        """
-        Override the delete method to return a status code.
-        """
-        self.perform_destroy(self.get_object())
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        try:
+            if self.request.user.role != 'admin':
+                raise PermissionDenied("You do not have permission to delete this resource.")
+            self.perform_destroy(self.get_object())
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except PermissionDenied as e:
+            return Response({'detail': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({'detail': f'An unexpected error occurred: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+    
 class UserCreateAPIView(generics.CreateAPIView):
     """
-    Create a new user (doctor or patient). Only accessible by admin.
+    Create a new user (doctor or patient).
     """
     serializer_class = CustomUserSerializer
     permission_classes = [IsAuthenticated]
@@ -99,4 +125,3 @@ class UserCreateAPIView(generics.CreateAPIView):
         if self.request.user.role != 'admin':
             raise PermissionDenied("You do not have permission to create this resource.")
         serializer.save()
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
